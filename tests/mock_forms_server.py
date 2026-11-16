@@ -278,8 +278,11 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
                 return
+            # shaped like Google's real confirmation page, which also embeds an EMPTY FB_PUBLIC_LOAD_DATA_
             return self._page(200, lambda ms: _simple_html(
-                st, ms, RECORDED_MARKER + ' <a href="%sviewform?usp=form_confirm">다른 응답 제출</a>' % BASE))
+                st, ms, RECORDED_MARKER + ' <a href="%sviewform?usp=form_confirm">다른 응답 제출</a>' % BASE
+                + '<script type="text/javascript">var FB_PUBLIC_LOAD_DATA_ = [null,[],"/forms","모의 설문",null,null,'
+                  'null,"",null,0,0,null,"",0,"e/%s",0,"[]",0,0,1];</script>' % FORM_ID))
 
         return self._send(404, "<html><body>Not Found</body></html>", date_ms=st.now_ms(), head_only=head_only)
 

@@ -165,6 +165,12 @@ class Units(unittest.TestCase):
             return g.Resp(status, headers, [], body.encode(), 0, 0, 0, None, None, None, True)
         form_page = '<input type="hidden" name="fbzx" value="1"> FB_PUBLIC_LOAD_DATA_'
         self.assertEqual(g.classify(resp(200, "응답이 기록되었습니다."), True)[0], "RECORDED")
+        # Google's real confirmation page (2026-11-16) embeds an empty FB_PUBLIC_LOAD_DATA_; it is still a success
+        real_confirm = ('<title>11/23 치킨데이 알바</title> 응답이 기록되었습니다. '
+                        '<a href="https://docs.google.com/forms/d/e/x/viewform?usp=form_confirm">다른 응답 제출</a>'
+                        '<script>var FB_PUBLIC_LOAD_DATA_ = [null,[],"/forms","11/23 치킨데이 알바",null,null,null,"",'
+                        'null,0,0,null,"",0,"e/x",0,"[]",0,0,1];</script>')
+        self.assertEqual(g.classify(resp(200, real_confirm), True)[0], "RECORDED")
         self.assertEqual(g.classify(resp(200, "감사합니다!"), True)[0], "RECORDED_PROBABLE")
         self.assertEqual(g.classify(resp(200, form_page), True)[0], "REJECTED")
         self.assertEqual(g.classify(resp(200, form_page), False)[0], "OPEN")

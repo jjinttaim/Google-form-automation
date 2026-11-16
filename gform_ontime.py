@@ -899,20 +899,23 @@ def classify(resp: Resp, was_post: bool) -> Tuple[str, str]:
     if st in (404, 410):
         return "NOT_FOUND", "HTTP %d (폼을 찾을 수 없음)" % st
     text = resp.text
-    is_form_page = "FB_PUBLIC_LOAD_DATA_" in text or re.search(r'<input[^>]*name="fbzx"', text) is not None
+    # A real question page carries the hidden fbzx input. (Google's confirmation page ALSO embeds an empty
+    # FB_PUBLIC_LOAD_DATA_, so that variable alone does not mean "the form came back".)
+    is_form_page = re.search(r'<input[^>]*name="fbzx"', text) is not None
+    confirmed = any(t in text for t in CONFIRM_TEXT) or "usp=form_confirm" in text
     if st == 400:
         return "REJECTED", "HTTP 400 (입력값이 폼과 맞지 않음)"
     if st >= 500:
         return "UNKNOWN", "HTTP %d (서버 오류 - 기록 여부 불명)" % st
     if st != 200:
         return "UNKNOWN", "HTTP %d" % st
+    if was_post and confirmed and not is_form_page:
+        return "RECORDED", "제출 확인 페이지를 받았습니다"
     if is_form_page:
         return ("REJECTED", "폼 페이지가 다시 표시되었습니다 (기록되지 않음)") if was_post else ("OPEN", "응답 받는 중")
     if any(t in text for t in CLOSED_TEXT):
         return "CLOSED", "폼이 응답을 받지 않는 상태입니다"
     if was_post:
-        if any(t in text for t in CONFIRM_TEXT) or "usp=form_confirm" in text:
-            return "RECORDED", "제출 확인 페이지를 받았습니다"
         return "RECORDED_PROBABLE", "HTTP 200 확인 페이지(문구는 설문 작성자가 바꾼 것으로 보임)"
     return "UNKNOWN", "알 수 없는 페이지"
 
