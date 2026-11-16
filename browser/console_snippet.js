@@ -389,7 +389,10 @@
       return s;
     } catch (e) {
       state.sampleErrors++;
-      if (!state.cancelled && !state.frozen) warn('시계 측정 요청 1건 실패: ' + (e && e.message ? e.message : e));
+      if (!state.cancelled && !state.frozen) {
+        if (state.sampleErrors <= 2) warn('시계 측정 요청 1건 실패: ' + (e && e.message ? e.message : e));
+        else if (state.sampleErrors === 3) warn('시계 측정 요청이 계속 실패합니다 (네트워크가 끊겼거나 로그인이 풀렸을 수 있습니다). 마지막으로 성공한 측정값으로 진행하며, 그만큼 늦게 발사될 수 있습니다.');
+      }
       return null;
     } finally {
       clearTimeout(killer); live.delete(ac);
@@ -607,18 +610,19 @@
     body = body || '';
     if (host === 'accounts.google.com' || /\/ServiceLogin|\/signin\//.test(path)) return ['LOGIN', '로그인 화면으로 넘어갔습니다. 기록되지 않았습니다 (로그인이 필요한 설문).'];
     if (status === 429 || /\/sorry\//.test(path)) return ['RATE_LIMITED', '서버가 요청이 너무 많다고 거절했습니다 (HTTP ' + status + '). 기록되지 않은 것으로 보입니다.'];
-    if (/\/closedform$/.test(path)) return ['CLOSED', '설문이 닫혀 있어 기록되지 않았습니다.'];
+    const closedMsg = '설문이 닫혀 있어 기록되지 않았습니다. (아직 열리지 않은 것이라면, 열린 뒤 페이지를 새로고침해서 직접 제출하세요.)';
+    if (/\/closedform$/.test(path)) return ['CLOSED', closedMsg];
     const formPage = /FB_PUBLIC_LOAD_DATA_/.test(body) && /name="fbzx"/.test(body);
     if (formPage) return ['REJECTED', '설문 페이지가 다시 돌아왔습니다 = 기록되지 않았습니다 (필수 항목 누락이나 값 오류).'];
     if (status === 400) return ['REJECTED', '서버가 요청을 거절했습니다 (HTTP 400). 기록되지 않았습니다.'];
     const recorded = RE_RECORDED.test(body);
     if (status === 200 && /\/formResponse$/.test(path)) {
       if (recorded) return ['RECORDED', '응답이 기록되었습니다.'];
-      if (RE_CLOSED.test(body)) return ['CLOSED', '설문이 닫혀 있어 기록되지 않았습니다.'];
+      if (RE_CLOSED.test(body)) return ['CLOSED', closedMsg];
       if (!body) return ['UNKNOWN', 'HTTP 200 을 받았지만 본문을 읽지 못했습니다. 기록 여부를 직접 확인하세요.'];
       return ['RECORDED_PROBABLE', '기록된 것으로 보입니다 (HTTP 200, 설문 페이지가 아님). 다만 알려진 확인 문구는 없었습니다 (설문 작성자가 확인 메시지를 바꾼 경우).'];
     }
-    if (RE_CLOSED.test(body)) return ['CLOSED', '설문이 닫혀 있어 기록되지 않았습니다.'];
+    if (RE_CLOSED.test(body)) return ['CLOSED', closedMsg];
     if (status >= 400 && status < 500) return ['REJECTED', '서버가 요청을 거절했습니다 (HTTP ' + status + '). 기록되지 않은 것으로 보입니다.'];
     return ['UNKNOWN', 'HTTP ' + status + ' 응답으로는 기록 여부를 판단할 수 없습니다.'];
   }
@@ -753,7 +757,9 @@
     ], leadWarn ? ['', leadWarn] : [], [
       '',
       CONFIG.via === 'click' ? '참고용으로 읽은 내용 (실제로는 페이지가 직접 보냅니다):' : (CONFIG.dryRun ? '실제 제출이라면 보낼 내용 (' : '보낼 내용 (') + payload.pairs.length + '개 필드, 순서대로):',
-    ], fieldLines, document.hidden ? ['', '주의: 이 탭이 화면에 보이지 않습니다. 탭을 띄워 두세요.'] : []).join('\n');
+    ], fieldLines,
+    T - serverNow > 24 * 3600e3 ? ['', '주의: 목표 시각까지 24시간 넘게 남았습니다. 날짜가 맞는지 확인하세요. 그때까지 이 탭을 닫거나 새로고침하면 안 됩니다.'] : [],
+    document.hidden ? ['', '주의: 이 탭이 화면에 보이지 않습니다. 탭을 띄워 두세요.'] : []).join('\n');
     log(summary);
     if (leadWarn) warn(leadWarn);
     if (T - serverNow < 8000) warn('목표 시각까지 ' + fmtLeft(T - serverNow) + ' 밖에 남지 않았습니다. 시계를 충분히 못 재면 그만큼 늦게(이르게는 아님) 발사됩니다.');
@@ -831,7 +837,8 @@
     state.quiet = true;                                   // console output could cost milliseconds: buffer it from here
     if (!state.rateLimited) {
       await pause(rel() - CONFIG.lastSampleMs - now());
-      if (rel() - now() > CONFIG.spinMs + 500) {
+      // (a hidden tab only gets timer wake-ups about once per second: no keep-warm there, straight to the long busy-wait)
+      if (!document.hidden && rel() - now() > CONFIG.spinMs + 500) {
         // never wait on a pending sample past the start of the busy-wait
         await withDeadline(takeSample('page'), rel() - CONFIG.spinMs - 150);
       }
@@ -896,8 +903,10 @@
       } else {
         setStatus('요청을 보냈습니다. 응답을 기다리는 중...');
         let r = null, body = '', netErr = null, tHdr = null;
-        try { r = await p; tHdr = now(); } catch (e) { netErr = e; }
-        if (r) { try { body = await r.text(); } catch (e) { res.bodyError = String(e && e.message ? e.message : e); } }
+        // stop WAITING after a while (the request itself is never aborted or repeated)
+        const within = (pr, ms, what) => Promise.race([pr, rawSleep(ms).then(() => { throw new Error(what); })]);
+        try { r = await within(p, 30000, '30초 동안 응답 없음'); tHdr = now(); } catch (e) { netErr = e; }
+        if (r) { try { body = await within(r.text(), 15000, '응답 본문을 15초 안에 다 받지 못함'); } catch (e) { res.bodyError = String(e && e.message ? e.message : e); } }
         const e = await rtWait(shot.url, tCall);
         let leftAt = tCall;
         if (e && e.requestStart >= tCall - 0.2 && (tHdr === null || e.requestStart <= tHdr)) {
@@ -926,6 +935,12 @@
               ? '이 순간 보낸 요청의 처리 시각을 밀리초로는 알 수 없습니다 (페이지에 server_time_ms 없음). 응답 Date 헤더: ' + r.headers.get('date') + (res.dateHeaderAtOrAfterT ? '  = T 이후에 처리된 것이 확인됨' : '')
               : '이 순간 보낸 요청을 Forms 서버가 처리한 시각: ' + fmtRel(res.landingMs).replace(/\.0 ms$/, ' ms') + '   [' + fmtClock(S) + ']';
             shown.push('[연습 완료] 아무것도 제출하지 않았습니다.', '목표 T = ' + fmtDate(T), releaseLine, res.detail);
+            if (S !== null) {
+              // how long after leaving this PC the Forms backend read its clock for this request
+              res.serverDelayMs = { lo: S - (leftAt + bCall.hi), hi: S + 1 - (leftAt + bCall.lo) };
+              shown.push('출발부터 서버가 처리하기까지: 약 ' + Math.max(0, res.serverDelayMs.lo).toFixed(0) + ' ~ ' + res.serverDelayMs.hi.toFixed(0) + ' ms' + (isFinite(plan.minRttPageMs) ? '  (보정 중 설문 페이지 왕복: 최소 ' + plan.minRttPageMs.toFixed(0) + ' ms)' : ''));
+              if (res.serverDelayMs.lo > 150) shown.push('참고: 설문 서버가 이번 요청을 느리게 처리했습니다. 연습을 한두 번 더 해 보세요. 계속 느리면 시크릿 창에서 설문을 새로 열어 연습해 보면 더 빠른 서버에 배정될 수도 있습니다 (확실하지는 않습니다).');
+            }
             if (res.request) shown.push('연결: ' + (res.request.protocol || '?') + (res.request.newConnection ? ', 새 연결을 맺음 (느려짐)' : ', 기존 연결 재사용') + ', fetch 호출 -> 전송 ' + res.request.startDelayMs.toFixed(1) + ' ms');
             shown.push('실제 제출(POST)도 이 정도, 또는 서버의 기록 처리 시간만큼 더 늦게 찍힐 것으로 예상됩니다.');
             if (S !== null && S < T && CONFIG.leadMs === 0) shown.push('*** 경고: 연습 요청이 T 이전에 처리되었습니다. 있어서는 안 되는 일입니다. 실제 제출에 쓰지 말고 문의하세요. ***');
