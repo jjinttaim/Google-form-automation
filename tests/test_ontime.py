@@ -10,8 +10,10 @@ import io
 import json
 import math
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -235,6 +237,42 @@ class TimedShots(Base):
             self.assertEqual(shot.outcome, "RECORDED", shot.detail)
             self.assertEqual(len(m.state.responses), 1)
             self.assertGreaterEqual(m.state.responses[0]["arrival_ms"], T)
+
+
+class SingleInstance(Base):
+    def test_second_fire_for_the_same_form_refuses_to_run(self):
+        with MockFormsServer(skew_ms=321.0, up_ms=3, down_ms=3, jitter_ms=1, backend_ms=10, proc_ms=0) as m:
+            T = self.target(m, 12.0)
+            tool = os.path.join(os.path.dirname(HERE), "gform_ontime.py")
+            env = dict(os.environ, PYTHONIOENCODING="utf-8")
+            base = [sys.executable, tool, "fire", m.form_url, "--at", at(T), "--yes", "--no-calibration",
+                    "--answer", "학년=2"]
+            first = subprocess.Popen(base + ["--answer", "이름=첫번째"], stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, env=env)
+            try:
+                time.sleep(2.0)
+                second = subprocess.run(base + ["--answer", "이름=두번째"], capture_output=True, env=env, timeout=60)
+                out1, _ = first.communicate(timeout=90)
+            finally:
+                if first.poll() is None:
+                    first.kill()
+            out2 = second.stdout.decode("utf-8", "replace")
+            self.assertEqual(second.returncode, 2, out2)
+            self.assertIn("이미 실행 중", out2)
+            self.assertEqual(first.returncode, 0, out1.decode("utf-8", "replace"))
+            self.assertEqual(len(m.state.responses), 1)
+            self.assertEqual(m.state.responses[0]["fields"][NAME], ["첫번째"])
+            self.assert_no_probe_of_form_response(m)
+
+    def test_lock_is_released_when_the_process_ends(self):
+        with MockFormsServer() as m:
+            target = g.parse_target(m.form_url)
+            code = ("import sys; sys.path.insert(0, %r); import gform_ontime as g; "
+                    "g.single_instance(g.parse_target(%r)); print('locked')" % (os.path.dirname(HERE), m.form_url))
+            for _ in range(2):                                    # the second run must get the lock again
+                r = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=30)
+                self.assertIn(b"locked", r.stdout, r.stderr)
+            self.assertTrue(target.base)
 
 
 class Refusals(Base):

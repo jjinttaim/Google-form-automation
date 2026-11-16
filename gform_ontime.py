@@ -46,6 +46,7 @@ import socket
 import ssl
 import statistics
 import sys
+import tempfile
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -210,6 +211,33 @@ class Target:
     @property
     def view_url(self) -> str:
         return self.origin + self.view_path
+
+
+_held_locks: list = []
+
+
+def single_instance(target: "Target") -> None:
+    """Refuse to run a second `fire` for the same form on this computer (started twice by mistake, or by two
+    schedulers). The operating system releases the lock when the process ends, however it ends."""
+    key = hashlib.sha1((target.host + target.base).encode("utf-8")).hexdigest()[:16]
+    path = os.path.join(tempfile.gettempdir(), "gform_ontime_%s.lock" % key)
+    try:
+        f = open(path, "a+")
+    except OSError:
+        return                                   # no writable temp dir: do not block the user over it
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise Abort("이 PC에서 같은 폼에 대한 제출 프로그램이 이미 실행 중입니다. 중복 제출을 막기 위해 "
+                    "이 실행은 아무것도 보내지 않고 종료합니다.", 2)
+    _held_locks.append(f)
 
 
 def parse_target(url: str) -> Target:
@@ -1624,6 +1652,7 @@ def wait_open_and_fire(sess: Session, plan: Plan, target_ms: float, shift_ms: fl
 
 def cmd_fire(a) -> int:
     setup_process()
+    single_instance(parse_target(a.url))           # before any network activity
     target_ms = parse_at(a.at, a.utc_offset)
     pairs = [tuple(x.split("=", 1)) for x in a.answer]
     for p in pairs:
@@ -2001,6 +2030,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     finally:
         while _sessions:
             _sessions.pop().close()
+        while _held_locks:                       # closing the file releases the lock
+            try:
+                _held_locks.pop().close()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
