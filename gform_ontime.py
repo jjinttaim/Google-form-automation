@@ -299,6 +299,21 @@ def _proxy_for(scheme: str, host: str) -> Optional[urllib.parse.SplitResult]:
     return urllib.parse.urlsplit(raw)
 
 
+def _proxy_hint() -> Optional[str]:
+    """Some sandboxes run an ephemeral local proxy whose port changes when it restarts, and publish the
+    current address in a file. If GFORM_PROXY_HINT_FILE names such a file, the first local proxy URL in
+    it is used when the configured proxy stops answering. (Unset on a normal PC: no effect.)"""
+    path = os.environ.get("GFORM_PROXY_HINT_FILE")
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            m = re.search(r"https?://(?:127\.0\.0\.1|localhost):\d+", f.read())
+        return m.group(0) if m else None
+    except OSError:
+        return None
+
+
 class RawConn:
     """One keep-alive HTTP/1.1 connection. Requests are strictly sequential."""
 
@@ -315,6 +330,20 @@ class RawConn:
 
     # -- connect ---------------------------------------------------------------------------------
     def connect(self) -> "RawConn":
+        try:
+            return self._connect()
+        except NetError:
+            if _proxy_for(self.scheme, self.host) is None:
+                raise
+            hint = _proxy_hint()
+            current = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+            if not hint or hint == current:
+                raise
+            os.environ["HTTPS_PROXY"] = os.environ["https_proxy"] = hint   # the proxy moved: follow it
+            self.addr = None
+            return self._connect()
+
+    def _connect(self) -> "RawConn":
         proxy = _proxy_for(self.scheme, self.host)
         dest_host, dest_port = (proxy.hostname, proxy.port or 8080) if proxy else (self.host, self.port)
         sock = None

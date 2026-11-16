@@ -136,6 +136,22 @@ class Units(unittest.TestCase):
         c.add(100.0, 110.0, t + 4, "fe")                           # ignored from now on
         self.assertEqual(c.bounds(t + 4)[0], 205.0 - 1e-9 * 0.5)
 
+    def test_proxy_hint_file(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
+            f.write("Outbound HTTPS goes through a local proxy at http://127.0.0.1:45695\n(set via HTTPS_PROXY)\n")
+        old = os.environ.get("GFORM_PROXY_HINT_FILE")
+        try:
+            os.environ["GFORM_PROXY_HINT_FILE"] = f.name
+            self.assertEqual(g._proxy_hint(), "http://127.0.0.1:45695")
+            os.environ["GFORM_PROXY_HINT_FILE"] = f.name + ".missing"
+            self.assertIsNone(g._proxy_hint())
+            del os.environ["GFORM_PROXY_HINT_FILE"]
+            self.assertIsNone(g._proxy_hint())
+        finally:
+            os.unlink(f.name)
+            if old is not None:
+                os.environ["GFORM_PROXY_HINT_FILE"] = old
+
     def test_mod_gap_ignores_the_sheet_time_zone(self):
         ref = 1795438800000.0                                       # 2026-11-23 13:00:00 UTC
         kst_in_day = (22 * 3600) * 1000 + 73                        # 22:00:00.073 in a KST sheet
